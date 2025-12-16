@@ -31,9 +31,13 @@ mod context;
 mod error;
 mod shader;
 mod validation;
+mod pipeline;
+mod buffer;
 
 pub use context::VulkanContext;
 pub use error::VulkanErrorKind;
+pub use pipeline::{GraphicsPipeline, create_simple_render_pass};
+pub use buffer::Buffer;
 
 /// HLX Vulkan Python module
 ///

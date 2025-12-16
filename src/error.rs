@@ -39,6 +39,18 @@ pub enum VulkanErrorKind {
     /// Entry point loading failed
     #[error("Failed to load Vulkan entry point: {0}")]
     EntryLoadFailed(String),
+
+    /// Failed to create graphics pipeline
+    #[error("Pipeline creation failed: {0}")]
+    PipelineCreationFailed(String),
+
+    /// Failed to create buffer
+    #[error("Buffer creation failed: {0}")]
+    BufferCreationFailed(String),
+
+    /// Buffer not found in cache
+    #[error("Buffer not found: {0}")]
+    BufferNotFound(String),
 }
 
 /// Convert VulkanErrorKind to Python exception

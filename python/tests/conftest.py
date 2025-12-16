@@ -4,6 +4,14 @@ Pytest configuration and fixtures for hlx_vulkan tests.
 
 import pytest
 import os
+import sys
+from pathlib import Path
+
+
+# Add hlx_runtime to path for shaderdb access
+hlx_runtime_path = Path(__file__).parent.parent.parent.parent / "helix-studio" / "hlx_runtime"
+if hlx_runtime_path.exists():
+    sys.path.insert(0, str(hlx_runtime_path.parent))
 
 
 def pytest_configure(config):
@@ -11,6 +19,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "gpu: marks tests that require a GPU (deselect with '-m \"not gpu\"')"
+    )
+    config.addinivalue_line(
+        "markers",
+        "integration: marks tests that require shader database (deselect with '-m \"not integration\"')"
     )
 
 
@@ -93,3 +105,64 @@ def real_spirv():
         0x01, 0x00, 0x00, 0x00,  # Bound
         0x00, 0x00, 0x00, 0x00,  # Reserved
     ])
+
+
+@pytest.fixture(scope="session")
+def shader_database():
+    """
+    Create and populate a shader database for testing.
+
+    Loads compiled shaders from the demo and returns the database path.
+    """
+    try:
+        from hlx_runtime.shaderdb import ShaderDatabase, ShaderHandle, ShaderMetadata
+    except ImportError:
+        pytest.skip("ShaderDatabase not available")
+
+    import tempfile
+    import datetime
+
+    # Create temp directory for shader database
+    db_dir = tempfile.mkdtemp(prefix="hlx_shader_db_")
+
+    db = ShaderDatabase(db_dir)
+
+    # Load compiled shaders from demo
+    demo_shaders_path = Path(__file__).parent.parent.parent / "examples" / "hlx-demo-cube" / "shaders" / "compiled"
+
+    if demo_shaders_path.exists():
+        # Load vertex shader
+        vert_path = demo_shaders_path / "cube.vert.spv"
+        if vert_path.exists():
+            with open(vert_path, "rb") as f:
+                spirv = f.read()
+            metadata = {
+                "name": "cube_vertex",
+                "shader_stage": "vertex",
+                "entry_point": "main",
+                "workgroup_size": None,
+                "descriptor_bindings": [],
+                "source_hash": None,
+                "created_at": datetime.datetime.now().isoformat(),
+                "tags": ["demo", "cube"]
+            }
+            db.add_shader(spirv, metadata)
+
+        # Load fragment shader
+        frag_path = demo_shaders_path / "cube.frag.spv"
+        if frag_path.exists():
+            with open(frag_path, "rb") as f:
+                spirv = f.read()
+            metadata = {
+                "name": "cube_fragment",
+                "shader_stage": "fragment",
+                "entry_point": "main",
+                "workgroup_size": None,
+                "descriptor_bindings": [],
+                "source_hash": None,
+                "created_at": datetime.datetime.now().isoformat(),
+                "tags": ["demo", "cube"]
+            }
+            db.add_shader(spirv, metadata)
+
+    return db_dir
