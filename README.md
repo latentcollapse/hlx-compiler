@@ -1,74 +1,163 @@
-# HLX+Vulkan Compute Engine
-## Deterministic GPU Compute with Content-Addressed Storage
+# hlx_vulkan
 
-[![Status](https://img.shields.io/badge/status-experimental-orange)]()
-[![Tests](https://img.shields.io/badge/tests-106%2F106-brightgreen)]()
+Rust+PyO3 Vulkan compute backend for HLX.
 
-HLX+Vulkan integrates HLX's deterministic execution model with Vulkan compute shaders.
+## Overview
 
-## Current Status
+This crate provides a professional-grade Vulkan interface for HLX, replacing Python's unreliable `vulkan` bindings with a type-safe Rust implementation exposed via PyO3.
 
-**Phase 1 (Starting):** Vulkan runtime integration
-- ✅ Contract schemas (CONTRACT_900-902) implemented
-- ✅ SPIR-V packaging tool working
-- ⏳ VulkanContext initialization (next)
-- ⏳ Shader loading (planned)
-- ⏳ Pipeline creation (planned)
-- ⏳ Kernel execution (planned)
+## Features
 
-See [docs/VULKAN_ROADMAP.md](docs/VULKAN_ROADMAP.md) for full 9-13 week roadmap.
+- **Content-Addressed Shader Caching**: Same SPIR-V bytes always return the same shader ID
+- **Clean Python API**: No Vulkan internals exposed to Python
+- **Proper Error Handling**: Descriptive errors instead of cryptic Vulkan codes
+- **Validation Support**: Optional Vulkan validation layers for debugging
 
-## Why HLX+Vulkan?
+## Installation
 
-**Problem:** CUDA requires kernel recompilation for each input variation, wasting power and latency.
+### Prerequisites
 
-**Solution:** HLX's content-addressed storage enables perfect memoization. Same input → instant cache hit.
+1. **Rust toolchain** (1.70+)
+   ```bash
+   rustup update stable
+   ```
 
-**Goal:** Demonstrate 3× faster warm-start latency vs CUDA on repeated inference workloads.
+2. **Vulkan SDK**
+   ```bash
+   # Arch Linux
+   sudo pacman -S vulkan-tools vulkan-validation-layers
+
+   # Ubuntu/Debian
+   sudo apt install vulkan-tools vulkan-validationlayers-dev
+   ```
+
+3. **maturin** (Python/Rust build tool)
+   ```bash
+   pip install maturin
+   ```
+
+### Build and Install
+
+```bash
+cd hlx_vulkan
+
+# Development build (fast iteration)
+maturin develop
+
+# Or build a release wheel
+maturin build --release
+pip install target/wheels/hlx_vulkan-*.whl
+```
+
+## Usage
+
+### Basic Example
+
+```python
+from hlx_vulkan import VulkanContext
+
+# Initialize Vulkan
+ctx = VulkanContext()
+print(f"GPU: {ctx.device_name}")
+print(f"API: {ctx.api_version}")
+
+# Load a shader (content-addressed caching)
+with open("shader.spv", "rb") as f:
+    spirv = f.read()
+
+shader_id = ctx.load_shader(spirv, "main")
+print(f"Shader ID: {shader_id}")
+
+# Second load returns same ID (cache hit)
+assert ctx.load_shader(spirv, "main") == shader_id
+assert ctx.is_shader_cached(shader_id)
+
+# Cleanup
+ctx.cleanup()
+```
+
+### With HLX Integration
+
+```python
+from hlx_runtime.vulkan_bridge import VulkanBridge
+from hlx_runtime.ls_ops import collapse
+from hlx_runtime.contracts import CONTRACT_IDS
+
+# Create CONTRACT_900 (VULKAN_SHADER)
+shader_contract = {
+    str(CONTRACT_IDS['VULKAN_SHADER']): {
+        'spirv_binary': spirv_bytes,
+        'entry_point': 'main',
+        'shader_stage': 'compute',
+        'descriptor_bindings': []
+    }
+}
+
+# Collapse to HLX handle
+handle = collapse(shader_contract)
+
+# Load via bridge
+bridge = VulkanBridge()
+shader_id = bridge.load_shader_from_hlx(handle)
+```
+
+## API Reference
+
+### VulkanContext
+
+The main entry point for Vulkan operations.
+
+#### Constructor
+
+```python
+VulkanContext(device_index=0, enable_validation=False)
+```
+
+- `device_index`: GPU index (0 = first available)
+- `enable_validation`: Enable Vulkan validation layers
+
+#### Properties
+
+- `device_name: str` - GPU name (e.g., "NVIDIA GeForce RTX 5060")
+- `api_version: str` - Vulkan API version (e.g., "1.4.312")
+
+#### Methods
+
+- `load_shader(spirv_bytes, entry_point) -> str` - Load SPIR-V shader, returns shader ID
+- `is_shader_cached(shader_id) -> bool` - Check if shader is in cache
+- `cache_size() -> int` - Get number of cached shaders
+- `clear_cache()` - Clear all cached shaders
+- `get_memory_info() -> dict` - Get GPU memory information
+- `cleanup()` - Release all Vulkan resources
+
+## Testing
+
+```bash
+# Rust unit tests
+cargo test
+
+# Python integration tests
+maturin develop
+pytest python/tests/ -v
+```
 
 ## Architecture
 
 ```
-HLX Handle → LC-B Encoding → SPIR-V Shader → Vulkan Pipeline → GPU Compute → HLX Handle
-      ↓                                                                ↓
-Content-Addressed                                              Deterministic
-   Storage                                                      (bit-identical)
+Python (HLX Runtime)
+        |
+        | PyO3 bindings
+        v
+Rust (hlx_vulkan)
+        |
+        | ash crate
+        v
+Vulkan Driver
+        |
+        v
+GPU (NVIDIA/AMD/Intel)
 ```
-
-## Quick Start (When Ready)
-
-```bash
-# Run benchmark (Docker)
-docker-compose up benchmark
-
-# Or run locally
-pip install -r requirements.txt
-python benchmarks/gemm_comparison.py
-```
-
-## Roadmap
-
-See [docs/VULKAN_ROADMAP.md](docs/VULKAN_ROADMAP.md) for detailed 9-13 week plan.
-
-**Target Milestones:**
-- ✅ Week 0: Corpus complete, runtime verified
-- 🔄 Week 1-2: Vulkan runtime foundation (CURRENT)
-- ⏳ Week 3-5: GEMM benchmark (parity with CUDA)
-- ⏳ Week 6-9: Warm-start optimization (beat CUDA)
-- ⏳ Week 10-12: Production polish + Docker
-- ⏳ Week 13: Public benchmarks + outreach
-
-## Related Projects
-
-- [HLX v1.1.0 Corpus](https://github.com/latentcollapse/HLXv1.1.0) - Language specification
-- [HLX Studio](https://github.com/latentcollapse/hlx-studio) - Development environment
-
-## Contributing
-
-**Current Status:** Early experimental phase. Not accepting external contributions yet.
-
-Once Phase 1 is complete and benchmarks are reproducible, contribution guidelines will be added.
 
 ## License
 
-MIT OR Apache-2.0
+MIT

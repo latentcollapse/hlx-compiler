@@ -1,0 +1,39 @@
+[package]
+name = "hlx_vulkan"
+version = "0.1.0"
+edition = "2021"
+authors = ["Matt <matt@example.com>"]
+description = "HLX Vulkan compute backend with PyO3 bindings"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/matt/hlx-vulkan"
+
+[lib]
+name = "hlx_vulkan"
+crate-type = ["cdylib"]  # Required for PyO3
+
+[dependencies]
+# Vulkan bindings - thin wrapper, full control
+ash = "0.38"
+
+# PyO3 for Python bindings
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+# Error handling
+thiserror = "2.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+# Testing
+pretty_assertions = "1.4"
+
+[features]
+default = []
+validation = []  # Enable Vulkan validation layers by default
+
+[profile.release]
+lto = true
+codegen-units = 1
