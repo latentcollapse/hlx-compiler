@@ -8,7 +8,7 @@
 
 **Production-ready HLX ecosystem with proven 84% cost savings and complete mathematical verification.**
 
-Built in 2 days from a $322/week budget using parallel Claude + Gemini orchestration.
+Built using parallel Claude + Gemini orchestration.
 
 ## The Research
 
