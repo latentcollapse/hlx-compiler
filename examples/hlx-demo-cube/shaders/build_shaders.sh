@@ -43,12 +43,12 @@ else
     glslangValidator -V -o "${BUILD_DIR}/cube.frag.spv" "${SCRIPT_DIR}/cube.frag"
 fi
 
-# Verify SPIR-V magic (0x07230203)
+# Verify SPIR-V magic (0x07230203 in little-endian = 03022307 in hex dump)
 echo ""
 echo "Verifying SPIR-V binaries..."
 for file in "${BUILD_DIR}"/*.spv; do
     MAGIC=$(xxd -p -l 4 "$file")
-    if [ "$MAGIC" = "07230307" ]; then
+    if [ "$MAGIC" = "03022307" ]; then
         SIZE=$(wc -c < "$file")
         echo "✓ $(basename $file) (${SIZE} bytes, magic: 0x${MAGIC})"
     else
