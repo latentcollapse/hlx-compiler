@@ -221,14 +221,7 @@ This ecosystem was built using **two frontier AI models in parallel**:
 
 Both worked independently on the same codebase with **zero coordination conflicts** because HLX contracts eliminated the O(n²) coordination overhead.
 
-Cost comparison:
-| Component | Claude | Gemini | Total | Traditional |
-|-----------|--------|--------|-------|-------------|
-| Backend | $48-52 | - | $48-52 | ~$100-120 |
-| Frontend | - | $50 | $50 | ~$50-80 |
-| **Total** | - | - | **$100** | **$150-200** |
-
-**Result: 84% cost savings with two models working in parallel, independently verified.**
+**Result: Cost savings with two models working in parallel, independently verified.**
 
 ## License
 
