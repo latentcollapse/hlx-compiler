@@ -3,10 +3,9 @@
 ![Tests Passing](https://img.shields.io/badge/tests-100%25%20passing-brightgreen)
 ![Axiom Verification](https://img.shields.io/badge/axioms-4%2F4%20verified-blue)
 ![Invariant Verification](https://img.shields.io/badge/invariants-3%2F3%20verified-blue)
-![Cost Efficiency](https://img.shields.io/badge/efficiency-6--8%25%20improvement-brightgreen)
-![Status](https://img.shields.io/badge/status-production%20ready-brightgreen)
+![Status](https://img.shields.io/badge/status-experimental-yellow)
 
-**Production-ready HLX ecosystem with proven 84% cost savings and complete mathematical verification.**
+**HLX ecosystem with complete mathematical verification. Performance benchmarks in progress.**
 
 Built using parallel Claude + Gemini orchestration.
 
@@ -46,6 +45,35 @@ All delivered with mathematical guarantees: axioms verified, invariants enforced
 ## Overview
 
 This ecosystem provides a professional-grade Vulkan interface for HLX via Rust+PyO3, replacing Python's unreliable `vulkan` bindings with type-safe GPU compute backed by formal verification.
+
+For complete repository organization, see [REPO_STRUCTURE.md](/home/matt/REPO_STRUCTURE.md).
+
+### Repository Structure
+
+```
+src/                    # Rust source code
+├── lib.rs             # Library entry point
+├── context.rs         # Vulkan context management
+├── buffer.rs          # GPU buffer operations
+├── pipeline.rs        # Pipeline management
+├── shader.rs          # Shader compilation
+├── validation.rs      # Validation utilities
+└── shaders/           # GLSL shader files
+
+tests/                 # Comprehensive test suite
+├── examples/          # Working example applications
+├── python/            # Python integration utilities
+├── tools/             # Development and profiling tools
+└── hlx_runtime/       # Integration with HLX runtime
+
+docs/                  # Documentation
+├── PHASE1_KICKOFF.md
+├── VULKAN_ROADMAP.md
+├── README_*.md
+└── LICENSE
+
+_archive/              # Historical documentation
+```
 
 ## Features
 
@@ -221,7 +249,7 @@ This ecosystem was built using **two frontier AI models in parallel**:
 
 Both worked independently on the same codebase with **zero coordination conflicts** because HLX contracts eliminated the O(n²) coordination overhead.
 
-**Result: Cost savings with two models working in parallel, independently verified.**
+**Result: Two models working in parallel with zero coordination conflicts.**
 
 ## License
 
