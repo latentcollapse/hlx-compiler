@@ -44,6 +44,12 @@ mod gemm_kernel;
 mod attention_kernel;
 mod transformer_layer;
 
+// Phase 9: LC-B Contract System
+pub mod lcb;
+
+// GPU Operations (reusable by LC-B contracts)
+pub mod gpu_ops;
+
 pub use context::VulkanContext;
 pub use error::VulkanErrorKind;
 pub use pipeline::{GraphicsPipeline, create_simple_render_pass};

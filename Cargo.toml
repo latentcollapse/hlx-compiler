@@ -28,6 +28,10 @@ path = "src/bin/hlx_demo_cube.rs"
 name = "hlx_vulkan_train"
 path = "src/bin/hlx_vulkan_train.rs"
 
+[[bin]]
+name = "hlx_lcb_service"
+path = "src/bin/hlx_lcb_service.rs"
+
 [dependencies]
 # CLI argument parsing
 clap = { version = "4.4", features = ["derive"] }
@@ -54,6 +58,9 @@ serde_json = "1.0"
 
 # Cryptographic hashing (content addressing)
 sha2 = "0.10"
+
+# Signal handling for graceful shutdown
+ctrlc = "3.4"
 
 [dev-dependencies]
 # Testing
