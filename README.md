@@ -1,13 +1,13 @@
-# HLX: Deterministic AI Development via Formal Contracts
+# HLX Compiler: Vulkan Backend for Deterministic GPU Code Generation
 
 ![Tests Passing](https://img.shields.io/badge/tests-100%25%20passing-brightgreen)
 ![Axiom Verification](https://img.shields.io/badge/axioms-4%2F4%20verified-blue)
 ![Invariant Verification](https://img.shields.io/badge/invariants-3%2F3%20verified-blue)
 ![Status](https://img.shields.io/badge/status-experimental-yellow)
 
-**HLX ecosystem with complete mathematical verification. Performance benchmarks in progress.**
+**Vulkan compiler for HLX with complete mathematical verification and deterministic GPU execution.**
 
-Built using parallel Claude + Gemini orchestration.
+Built using parallel Claude + Gemini orchestration, achieving zero coordination conflicts through HLX contracts.
 
 ## The Research
 
@@ -250,6 +250,14 @@ This ecosystem was built using **two frontier AI models in parallel**:
 Both worked independently on the same codebase with **zero coordination conflicts** because HLX contracts eliminated the O(n²) coordination overhead.
 
 **Result: Two models working in parallel with zero coordination conflicts.**
+
+## HLX Ecosystem
+
+- **[hlx](../hlx/)** - Core language specification and runtime
+- **[hlx-dev-studio](../hlx-dev-studio/)** - IDE and training orchestration
+- **[hlx-research](../hlx-research/)** - LLM cognition research
+
+---
 
 ## License
 
