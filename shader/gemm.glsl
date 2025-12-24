@@ -101,8 +101,9 @@ void main() {
         
         // Compute partial dot product for this tile
         // CRITICAL: Fixed iteration order within tile
+        // Use FMA for better numerical precision
         for (uint k = 0; k < TILE_SIZE; k++) {
-            sum += tile_A[local_row][k] * tile_B[k][local_col];
+            sum = fma(tile_A[local_row][k], tile_B[k][local_col], sum);
         }
         
         // Synchronize before loading next tiles

@@ -105,7 +105,7 @@ void main() {
             memoryBarrierShared();
             
             for (uint k = 0; k < TILE_SIZE; k++) {
-                sum += tile_1[local_row][k] * tile_2[k][local_col];
+                sum = fma(tile_1[local_row][k], tile_2[k][local_col], sum);
             }
             
             barrier();
@@ -156,7 +156,7 @@ void main() {
             memoryBarrierShared();
             
             for (uint k = 0; k < TILE_SIZE; k++) {
-                sum += tile_1[local_row][k] * tile_2[k][local_col];
+                sum = fma(tile_1[local_row][k], tile_2[k][local_col], sum);
             }
             
             barrier();

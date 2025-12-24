@@ -1,5 +1,6 @@
 #version 460 core
 #extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_atomic_float : require
 
 // =============================================================================
 // LAYER NORMALIZATION - BACKWARD PASS
@@ -42,14 +43,14 @@ layout(binding = 4, std430) writeonly buffer GradInput {
     float grad_input[];
 };
 
-// Workgroup-local gamma gradients (staged for deterministic reduction)
-layout(binding = 5, std430) buffer WorkgroupGradGamma {
-    float wg_grad_gamma[];  // Size: num_workgroups * d_model
+// Accumulated gamma gradients (using atomicAdd)
+layout(binding = 5, std430) buffer GradGamma {
+    float grad_gamma[];  // Size: d_model
 };
 
-// Workgroup-local beta gradients
-layout(binding = 6, std430) buffer WorkgroupGradBeta {
-    float wg_grad_beta[];  // Size: num_workgroups * d_model
+// Accumulated beta gradients (using atomicAdd)
+layout(binding = 6, std430) buffer GradBeta {
+    float grad_beta[];  // Size: d_model
 };
 
 // Parameters
@@ -130,57 +131,16 @@ void main() {
         grad_input[base_idx + i] = dx;
     }
     
-    // Step 3: Compute local gamma and beta gradients for this position
-    // These need to be accumulated across all positions
-    float local_dgamma = 0.0;
-    float local_dbeta = 0.0;
-    
+    // Step 3: Accumulate gamma and beta gradients using atomicAdd
+    // d_gamma[i] = sum over positions of (dy * normalized)
+    // d_beta[i] = sum over positions of (dy)
     for (uint i = tid; i < params.d_model; i += BLOCK_SIZE) {
         float x = input_data[base_idx + i];
         float normalized = (x - mean) * inv_std;
         float dy = grad_output[base_idx + i];
-        
-        // Accumulate into workgroup staging buffer
-        // We write per-position contributions, then reduce later
-        
-        // For thread 0 to write this position's contribution
-        shared_sum1[tid] = dy * normalized;  // d_gamma contribution
-        shared_sum2[tid] = dy;               // d_beta contribution
-        
-        barrier();
-        memoryBarrierShared();
-        
-        // Reduce within workgroup for this feature index
-        // Only thread 0 writes to staging buffer
-        if (tid == 0) {
-            float sum_dgamma = 0.0;
-            float sum_dbeta = 0.0;
-            for (uint j = 0; j < min(BLOCK_SIZE, params.d_model - i); j++) {
-                // This would need adjustment for proper accumulation
-                // Simplified: each position contributes to staging
-            }
-        }
-    }
-    
-    // Write this workgroup's contribution to staging
-    // The reduction kernel will sum across all workgroups
-    if (tid < params.d_model) {
-        float x = input_data[base_idx + tid];
-        float normalized = (x - mean) * inv_std;
-        float dy = grad_output[base_idx + tid];
-        
-        wg_grad_gamma[wid * params.d_model + tid] = dy * normalized;
-        wg_grad_beta[wid * params.d_model + tid] = dy;
-    }
-    
-    // Handle case where d_model > BLOCK_SIZE
-    for (uint i = tid + BLOCK_SIZE; i < params.d_model; i += BLOCK_SIZE) {
-        float x = input_data[base_idx + i];
-        float normalized = (x - mean) * inv_std;
-        float dy = grad_output[base_idx + i];
-        
-        // Atomic add to staging (within workgroup region)
-        wg_grad_gamma[wid * params.d_model + i] = dy * normalized;
-        wg_grad_beta[wid * params.d_model + i] = dy;
+
+        // Atomic add this position's contribution to global gradient
+        atomicAdd(grad_gamma[i], dy * normalized);
+        atomicAdd(grad_beta[i], dy);
     }
 }

@@ -219,6 +219,13 @@ struct AttentionScalesPushConstants {
     scale: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BiasGradientPushConstants {
+    num_rows: u32,
+    num_cols: u32,
+}
+
 fn push_to_bytes<T>(push: &T) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(push as *const T as *const u8, std::mem::size_of::<T>())
@@ -251,8 +258,8 @@ impl Default for TrainConfig {
             model_size: "tiny".to_string(),
             num_epochs: 100,
             batch_size: 4,
-            learning_rate: 3e-4,
-            warmup_steps: 100,
+            learning_rate: 3e-4,  // Higher LR with cosine decay
+            warmup_steps: 10,  // Short warmup before decay
             checkpoint_dir: PathBuf::from("./checkpoints"),
             checkpoint_freq: 10,
             patience: 20,
@@ -277,13 +284,14 @@ pub struct TransformerConfig {
 impl TransformerConfig {
     pub fn tiny() -> Self {
         Self {
-            vocab_size: 260,
+            // Match CUDA benchmark: vocab_size=128, max_seq_len=16
+            vocab_size: 128,
             d_model: 256,
             num_layers: 4,
             num_heads: 4,
             head_dim: 64,
             ffn_dim: 1024,
-            max_seq_len: 128,
+            max_seq_len: 16,
             eps: 1e-5,
         }
     }
@@ -356,18 +364,19 @@ impl CharTokenizer {
     pub fn new() -> Self {
         Self { pad_token: 0, bos_token: 1, eos_token: 2 }
     }
-    
+
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        let mut tokens = vec![self.bos_token];
-        for c in text.chars() {
-            let code = c as u32;
-            tokens.push(if code < 256 { code + 4 } else { 3 }); // 3 = UNK
-        }
-        tokens.push(self.eos_token);
-        tokens
+        // Match CUDA tokenizer: raw ASCII values, clamped to 127
+        // No BOS/EOS tokens to match benchmark_cuda.py
+        text.chars()
+            .map(|c| {
+                let code = c as u32;
+                if code < 128 { code } else { 127 }
+            })
+            .collect()
     }
-    
-    pub fn vocab_size(&self) -> u32 { 260 }
+
+    pub fn vocab_size(&self) -> u32 { 128 }
 }
 
 // =============================================================================
@@ -380,6 +389,7 @@ pub struct Batch {
     pub target_ids: Vec<u32>,
     pub batch_size: u32,
     pub seq_len: u32,
+    pub num_valid_tokens: u32,  // Number of non-padding tokens
 }
 
 pub fn create_batches(
@@ -389,37 +399,44 @@ pub fn create_batches(
     max_seq_len: usize,
 ) -> Vec<Batch> {
     let mut batches = Vec::new();
-    
+
     for chunk in examples.chunks(batch_size) {
         let actual_batch_size = chunk.len();
-        let mut all_tokens: Vec<Vec<u32>> = chunk.iter()
-            .map(|ex| tokenizer.encode(&format!("{} -> {}", ex.input, ex.output)))
-            .collect();
-        
-        let max_len = all_tokens.iter().map(|t| t.len()).max().unwrap_or(1);
-        let seq_len = max_len.min(max_seq_len);
-        
+
         let mut input_ids = Vec::new();
         let mut target_ids = Vec::new();
-        
-        for tokens in &mut all_tokens {
-            if tokens.len() > seq_len { tokens.truncate(seq_len); }
-            
-            for i in 0..seq_len {
-                if i < tokens.len() {
-                    input_ids.push(tokens[i]);
-                    target_ids.push(if i + 1 < tokens.len() { tokens[i + 1] } else { tokenizer.eos_token });
-                } else {
-                    input_ids.push(tokenizer.pad_token);
-                    target_ids.push(tokenizer.pad_token);
-                }
+
+        for ex in chunk {
+            // Match CUDA: tokenize, truncate, pad
+            let text = format!("{} -> {}", ex.input, ex.output);
+            let mut tokens: Vec<u32> = tokenizer.encode(&text);
+            tokens.truncate(max_seq_len);
+
+            // Pad to max_seq_len
+            while tokens.len() < max_seq_len {
+                tokens.push(0);
             }
+
+            // Match CUDA: input = tokens[:-1] + [0], target = tokens[1:] + [0]
+            let mut inp: Vec<u32> = tokens[..tokens.len()-1].to_vec();
+            inp.push(0);
+            let mut tgt: Vec<u32> = tokens[1..].to_vec();
+            tgt.push(0);
+
+            input_ids.extend(inp);
+            target_ids.extend(tgt);
         }
-        
+
+        // Count valid (non-padding) tokens
+        let num_valid_tokens = target_ids.iter()
+            .filter(|&&t| t != 0)
+            .count() as u32;
+
         batches.push(Batch {
             input_ids, target_ids,
             batch_size: actual_batch_size as u32,
-            seq_len: seq_len as u32,
+            seq_len: max_seq_len as u32,
+            num_valid_tokens,
         });
     }
     batches
@@ -488,19 +505,9 @@ impl LRSchedule {
     pub fn new(base_lr: f32, warmup_steps: u32, total_steps: u32) -> Self {
         Self { base_lr, warmup_steps, total_steps }
     }
-    
+
     pub fn get_lr(&self, step: u32) -> f32 {
-        // TEMPORARY: Use constant LR to match CUDA baseline
-        // TODO: Re-enable cosine decay after verifying convergence parity
-        /*
-        if step < self.warmup_steps {
-            self.base_lr * (step as f32 / self.warmup_steps as f32)
-        } else {
-            let progress = (step - self.warmup_steps) as f32 / (self.total_steps - self.warmup_steps).max(1) as f32;
-            let decay = 0.5 * (1.0 + (std::f32::consts::PI * progress.min(1.0)).cos());
-            self.base_lr * 0.1 + self.base_lr * 0.9 * decay
-        }
-        */
+        // Match CUDA: constant LR
         self.base_lr
     }
 }
@@ -520,7 +527,9 @@ struct LayerBuffers {
     ln2_beta: (vk::Buffer, vk::DeviceMemory),
     ffn_w1: (vk::Buffer, vk::DeviceMemory),
     ffn_w2: (vk::Buffer, vk::DeviceMemory),
-    
+    ffn_b1: (vk::Buffer, vk::DeviceMemory),  // FFN bias (matches CUDA)
+    ffn_b2: (vk::Buffer, vk::DeviceMemory),
+
     // Gradients
     v_proj_grad: (vk::Buffer, vk::DeviceMemory),
     o_proj_grad: (vk::Buffer, vk::DeviceMemory),
@@ -530,7 +539,9 @@ struct LayerBuffers {
     ln2_beta_grad: (vk::Buffer, vk::DeviceMemory),
     ffn_w1_grad: (vk::Buffer, vk::DeviceMemory),
     ffn_w2_grad: (vk::Buffer, vk::DeviceMemory),
-    
+    ffn_b1_grad: (vk::Buffer, vk::DeviceMemory),
+    ffn_b2_grad: (vk::Buffer, vk::DeviceMemory),
+
     // Adam state (m, v for each weight)
     v_proj_m: (vk::Buffer, vk::DeviceMemory),
     v_proj_v: (vk::Buffer, vk::DeviceMemory),
@@ -548,6 +559,10 @@ struct LayerBuffers {
     ffn_w1_v: (vk::Buffer, vk::DeviceMemory),
     ffn_w2_m: (vk::Buffer, vk::DeviceMemory),
     ffn_w2_v: (vk::Buffer, vk::DeviceMemory),
+    ffn_b1_m: (vk::Buffer, vk::DeviceMemory),
+    ffn_b1_v: (vk::Buffer, vk::DeviceMemory),
+    ffn_b2_m: (vk::Buffer, vk::DeviceMemory),
+    ffn_b2_v: (vk::Buffer, vk::DeviceMemory),
 }
 
 /// Activation buffers (shared across layers, reused per batch)
@@ -565,7 +580,8 @@ struct ActivationBuffers {
     attn_out: (vk::Buffer, vk::DeviceMemory),
     
     // FFN intermediates
-    ffn_hidden: (vk::Buffer, vk::DeviceMemory),
+    ffn_hidden: (vk::Buffer, vk::DeviceMemory),  // Post-GELU (used for FFN W2)
+    pre_gelu: (vk::Buffer, vk::DeviceMemory),    // Pre-GELU (saved for backward)
     ffn_out: (vk::Buffer, vk::DeviceMemory),
     
     // For residual connections
@@ -645,8 +661,9 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
     let elementwise_spv = load_shader("elementwise.spv")?;
     let reduce_sum_spv = load_shader("reduce_sum.spv")?;
     let reduce_final_spv = load_shader("reduce_final.spv")?;
+    let bias_gradient_spv = load_shader("bias_gradient.spv")?;
     
-    println!("  Loaded 16 shaders");
+    println!("  Loaded 17 shaders");
     
     // =========================================================================
     // VULKAN SETUP
@@ -746,7 +763,42 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
         }
         Ok(())
     };
-    
+
+    // Debug: dump tensor to JSON file
+    let dump_tensor = |name: &str, memory: vk::DeviceMemory, size: usize, shape: &[usize]| -> Result<(), String> {
+        let mut data = vec![0.0f32; size];
+        download_f32(memory, &mut data)?;
+
+        // Compute stats
+        let sum: f32 = data.iter().sum();
+        let mean = sum / data.len() as f32;
+        let variance: f32 = data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
+        let std = variance.sqrt();
+        let min = data.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let abs_max = data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        let num_zeros = data.iter().filter(|&&x| x == 0.0).count();
+        let num_nan = data.iter().filter(|x| x.is_nan()).count();
+        let num_inf = data.iter().filter(|x| x.is_infinite()).count();
+
+        // First 10 and last 10 values
+        let first_10: Vec<f32> = data.iter().take(10).cloned().collect();
+        let last_10: Vec<f32> = data.iter().rev().take(10).rev().cloned().collect();
+
+        println!("  [{name}] shape={shape:?} mean={mean:.6} std={std:.6} min={min:.6} max={max:.6} abs_max={abs_max:.6} zeros={num_zeros} nan={num_nan} inf={num_inf}");
+        println!("    first10: {:?}", first_10.iter().map(|x| format!("{:.4}", x)).collect::<Vec<_>>());
+
+        // Save to file
+        let json = format!(
+            r#"{{"name":"{}","shape":{:?},"mean":{},"std":{},"min":{},"max":{},"abs_max":{},"zeros":{},"nan":{},"inf":{},"first_100":{:?}}}"#,
+            name, shape, mean, std, min, max, abs_max, num_zeros, num_nan, num_inf,
+            data.iter().take(100).cloned().collect::<Vec<_>>()
+        );
+        std::fs::write(format!("/tmp/hlx_debug_{}.json", name), json).ok();
+
+        Ok(())
+    };
+
     // Xavier initialization
     let mut rng_seed = config.seed;
     let mut rng = || {
@@ -842,7 +894,9 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
         let ln2_beta = create_buffer(ln_size)?;
         let ffn_w1 = create_buffer(ffn1_size)?;
         let ffn_w2 = create_buffer(ffn2_size)?;
-        
+        let ffn_b1 = create_buffer((ffn_dim * 4) as u64)?;  // Bias for FFN W1 (matches CUDA)
+        let ffn_b2 = create_buffer((d_model * 4) as u64)?;  // Bias for FFN W2 (matches CUDA)
+
         // Initialize weights
         upload_f32(v_proj.1, &xavier_init(d_model * d_model, d_model, d_model))?;
         upload_f32(o_proj.1, &xavier_init(d_model * d_model, d_model, d_model))?;
@@ -850,9 +904,27 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
         upload_f32(ln1_beta.1, &vec![0.0f32; d_model])?;
         upload_f32(ln2_gamma.1, &vec![1.0f32; d_model])?;
         upload_f32(ln2_beta.1, &vec![0.0f32; d_model])?;
-        upload_f32(ffn_w1.1, &xavier_init(d_model * ffn_dim, d_model, ffn_dim))?;
-        upload_f32(ffn_w2.1, &xavier_init(ffn_dim * d_model, ffn_dim, d_model))?;
-        
+        // Use Kaiming init for FFN (better for GELU)
+        // Use separate RNG to avoid borrow conflict with xavier_init
+        let mut kaiming_seed = config.seed.wrapping_add(12345);
+        let mut kaiming_rng = || {
+            kaiming_seed = kaiming_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (kaiming_seed as f64 / u64::MAX as f64) as f32
+        };
+        let ffn1_std = (2.0 / d_model as f32).sqrt();
+        let ffn1_weights: Vec<f32> = (0..d_model * ffn_dim)
+            .map(|_| (2.0 * kaiming_rng() - 1.0) * ffn1_std)
+            .collect();
+        upload_f32(ffn_w1.1, &ffn1_weights)?;
+        let ffn2_std = (2.0 / ffn_dim as f32).sqrt();
+        let ffn2_weights: Vec<f32> = (0..ffn_dim * d_model)
+            .map(|_| (2.0 * kaiming_rng() - 1.0) * ffn2_std)
+            .collect();
+        upload_f32(ffn_w2.1, &ffn2_weights)?;
+        // Initialize FFN bias to zero (PyTorch default)
+        upload_f32(ffn_b1.1, &vec![0.0f32; ffn_dim])?;
+        upload_f32(ffn_b2.1, &vec![0.0f32; d_model])?;
+
         // Gradients
         let v_proj_grad = create_buffer(attn_size)?;
         let o_proj_grad = create_buffer(attn_size)?;
@@ -862,7 +934,9 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
         let ln2_beta_grad = create_buffer(ln_size)?;
         let ffn_w1_grad = create_buffer(ffn1_size)?;
         let ffn_w2_grad = create_buffer(ffn2_size)?;
-        
+        let ffn_b1_grad = create_buffer((ffn_dim * 4) as u64)?;
+        let ffn_b2_grad = create_buffer((d_model * 4) as u64)?;
+
         // Adam state
         let v_proj_m = create_buffer(attn_size)?;
         let v_proj_v = create_buffer(attn_size)?;
@@ -880,7 +954,11 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
         let ffn_w1_v = create_buffer(ffn1_size)?;
         let ffn_w2_m = create_buffer(ffn2_size)?;
         let ffn_w2_v = create_buffer(ffn2_size)?;
-        
+        let ffn_b1_m = create_buffer((ffn_dim * 4) as u64)?;
+        let ffn_b1_v = create_buffer((ffn_dim * 4) as u64)?;
+        let ffn_b2_m = create_buffer((d_model * 4) as u64)?;
+        let ffn_b2_v = create_buffer((d_model * 4) as u64)?;
+
         // Initialize Adam state to zeros
         upload_f32(v_proj_m.1, &vec![0.0f32; d_model * d_model])?;
         upload_f32(v_proj_v.1, &vec![0.0f32; d_model * d_model])?;
@@ -898,18 +976,23 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
         upload_f32(ffn_w1_v.1, &vec![0.0f32; d_model * ffn_dim])?;
         upload_f32(ffn_w2_m.1, &vec![0.0f32; ffn_dim * d_model])?;
         upload_f32(ffn_w2_v.1, &vec![0.0f32; ffn_dim * d_model])?;
-        
+        upload_f32(ffn_b1_m.1, &vec![0.0f32; ffn_dim])?;
+        upload_f32(ffn_b1_v.1, &vec![0.0f32; ffn_dim])?;
+        upload_f32(ffn_b2_m.1, &vec![0.0f32; d_model])?;
+        upload_f32(ffn_b2_v.1, &vec![0.0f32; d_model])?;
+
         layers.push(LayerBuffers {
             v_proj, o_proj,
             ln1_gamma, ln1_beta, ln2_gamma, ln2_beta,
-            ffn_w1, ffn_w2,
+            ffn_w1, ffn_w2, ffn_b1, ffn_b2,
             v_proj_grad, o_proj_grad,
             ln1_gamma_grad, ln1_beta_grad, ln2_gamma_grad, ln2_beta_grad,
-            ffn_w1_grad, ffn_w2_grad,
+            ffn_w1_grad, ffn_w2_grad, ffn_b1_grad, ffn_b2_grad,
             v_proj_m, v_proj_v, o_proj_m, o_proj_v,
             ln1_gamma_m, ln1_gamma_v, ln1_beta_m, ln1_beta_v,
             ln2_gamma_m, ln2_gamma_v, ln2_beta_m, ln2_beta_v,
             ffn_w1_m, ffn_w1_v, ffn_w2_m, ffn_w2_v,
+            ffn_b1_m, ffn_b1_v, ffn_b2_m, ffn_b2_v,
         });
         
         println!("    Layer {} allocated", layer_idx + 1);
@@ -930,6 +1013,7 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
         v: create_buffer(act_size)?,
         attn_out: create_buffer(act_size)?,
         ffn_hidden: create_buffer(ffn_size)?,
+        pre_gelu: create_buffer(ffn_size)?,  // Save pre-GELU for backward
         ffn_out: create_buffer(act_size)?,
         residual1: create_buffer(act_size)?,
         residual2: create_buffer(act_size)?,
@@ -1004,6 +1088,7 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
     let elementwise_shader = create_shader_module(&elementwise_spv)?;
     let reduce_shader = create_shader_module(&reduce_sum_spv)?;
     let reduce_final_shader = create_shader_module(&reduce_final_spv)?;
+    let bias_gradient_shader = create_shader_module(&bias_gradient_spv)?;
     
     // Descriptor set layout (8 bindings max)
     let bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..8)
@@ -1059,8 +1144,9 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
     let elementwise_pipeline = create_pipeline(elementwise_shader)?;
     let reduce_pipeline = create_pipeline(reduce_shader)?;
     let reduce_final_pipeline = create_pipeline(reduce_final_shader)?;
+    let bias_gradient_pipeline = create_pipeline(bias_gradient_shader)?;
     
-    println!("  Created 16 pipelines");
+    println!("  Created 17 pipelines");
     
     // Descriptor pool (large enough for all operations)
     let pool_sizes = [vk::DescriptorPoolSize::default()
@@ -1136,6 +1222,10 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
             alloc_desc_set().unwrap(), // 28: LN2 gamma Adam
             alloc_desc_set().unwrap(), // 29: LN2 beta Adam
             alloc_desc_set().unwrap(), // 30: copy d_ln1_in -> d_layer_input
+            alloc_desc_set().unwrap(), // 31: FFN B1 gradient (bias gradient)
+            alloc_desc_set().unwrap(), // 32: FFN B2 gradient (bias gradient)
+            alloc_desc_set().unwrap(), // 33: FFN B1 Adam
+            alloc_desc_set().unwrap(), // 34: FFN B2 Adam
         )
     }).collect();
     
@@ -1245,10 +1335,12 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
             barrier();
             
             // Copy embedded to layer_input for first layer
-            // (Using elementwise add with scalar 0 as a copy)
+            // (Using elementwise add_scalar with scalar=0 as a copy)
+            // Shader expects: binding 0=A, binding 1=B (unused for mode 4), binding 2=C (output)
             update_desc(layer_descs[0].8, &[
                 (0, embedded_buf, (max_positions * d_model * 4) as u64),
-                (1, activations.layer_input.0, (max_positions * d_model * 4) as u64),
+                (1, embedded_buf, (max_positions * d_model * 4) as u64),  // B not used, just bind same
+                (2, activations.layer_input.0, (max_positions * d_model * 4) as u64),  // Output
             ]);
             let copy_push = ElementwisePushConstants { num_elements: (num_positions * d_model) as u32, mode: 4, scalar: 0.0 };
             unsafe {
@@ -1358,17 +1450,18 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 }
                 barrier();
                 
-                // FFN W1: ln2_out @ ffn_w1 -> ffn_hidden
+                // FFN W1: ln2_out @ ffn_w1 + b1 -> ffn_hidden
                 update_desc(descs.5, &[
                     (0, activations.ln2_out.0, (max_positions * d_model * 4) as u64),
                     (1, layer.ffn_w1.0, (d_model * ffn_dim * 4) as u64),
                     (2, activations.ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),
+                    (3, layer.ffn_b1.0, (ffn_dim * 4) as u64),  // FFN bias (matches CUDA)
                 ]);
                 let ffn1_push = GemmPushConstants {
                     m: num_positions as u32,
                     k: d_model as u32,
                     n: ffn_dim as u32,
-                    use_bias: 0,
+                    use_bias: 1,  // Enable FFN bias (matches CUDA)
                 };
                 unsafe {
                     device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, gemm_pipeline);
@@ -1378,7 +1471,27 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 }
                 barrier();
                 
-                // GELU: ffn_hidden -> ffn_hidden (in-place)
+                // GELU: save pre-gelu values first, then apply GELU in-place
+                // Copy ffn_hidden to pre_gelu using elementwise (mode 4 = add_scalar with scalar=0)
+                update_desc(descs.6, &[
+                    (0, activations.ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),  // A (source)
+                    (1, activations.ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),  // B (unused)
+                    (2, activations.pre_gelu.0, (max_positions * ffn_dim * 4) as u64),    // C (output)
+                ]);
+                let copy_push = ElementwisePushConstants {
+                    num_elements: (num_positions * ffn_dim) as u32,
+                    mode: 4, // add_scalar: C = A + scalar (with scalar=0, this is copy)
+                    scalar: 0.0
+                };
+                unsafe {
+                    device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, elementwise_pipeline);
+                    device.cmd_bind_descriptor_sets(cmd_buffer, vk::PipelineBindPoint::COMPUTE, pipeline_layout, 0, &[descs.6], &[]);
+                    device.cmd_push_constants(cmd_buffer, pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, push_to_bytes(&copy_push));
+                    device.cmd_dispatch(cmd_buffer, ((num_positions * ffn_dim + 255) / 256) as u32, 1, 1);
+                }
+                barrier();
+
+                // Now apply GELU in-place to ffn_hidden
                 update_desc(descs.6, &[
                     (0, activations.ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),
                     (1, activations.ffn_hidden.0, (max_positions * ffn_dim * 4) as u64), // in-place
@@ -1392,17 +1505,18 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 }
                 barrier();
                 
-                // FFN W2: ffn_hidden @ ffn_w2 -> ffn_out
+                // FFN W2: ffn_hidden @ ffn_w2 + b2 -> ffn_out
                 update_desc(descs.7, &[
                     (0, activations.ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),
                     (1, layer.ffn_w2.0, (ffn_dim * d_model * 4) as u64),
                     (2, activations.ffn_out.0, (max_positions * d_model * 4) as u64),
+                    (3, layer.ffn_b2.0, (d_model * 4) as u64),  // FFN bias (matches CUDA)
                 ]);
                 let ffn2_push = GemmPushConstants {
                     m: num_positions as u32,
                     k: ffn_dim as u32,
                     n: d_model as u32,
-                    use_bias: 0,
+                    use_bias: 1,  // Enable FFN bias (matches CUDA)
                 };
                 unsafe {
                     device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, gemm_pipeline);
@@ -1430,7 +1544,8 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 if layer_idx < num_layers - 1 {
                     update_desc(layer_descs[layer_idx + 1].9, &[
                         (0, activations.layer_output.0, (max_positions * d_model * 4) as u64),
-                        (1, activations.layer_input.0, (max_positions * d_model * 4) as u64),
+                        (1, activations.layer_output.0, (max_positions * d_model * 4) as u64),  // B unused
+                        (2, activations.layer_input.0, (max_positions * d_model * 4) as u64),  // Output
                     ]);
                     unsafe {
                         device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, elementwise_pipeline);
@@ -1616,10 +1731,14 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 (1, output_proj_buf, (d_model * vocab_size * 4) as u64),
                 (2, activations.d_layer_output.0, (max_positions * d_model * 4) as u64),
             ]);
+            // FIXED: For mode 0 (dA = dC @ B^T):
+            // dC = logits_grad (M × N) = (64 × 128)
+            // B = output_proj (K × N) = (256 × 128), so B^T = (128 × 256)
+            // dA = d_layer_output (M × K) = (64 × 256)
             let dA_push = GemmPushConstants {
-                m: num_positions as u32,
-                k: vocab_size as u32,
-                n: d_model as u32,
+                m: num_positions as u32,  // 64
+                k: d_model as u32,        // 256 (NOT vocab_size!)
+                n: vocab_size as u32,     // 128 (NOT d_model!)
                 use_bias: 0, // mode 0: compute dA
             };
             unsafe {
@@ -1629,7 +1748,14 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 device.cmd_dispatch(cmd_buffer, ((d_model + 15) / 16) as u32, ((num_positions + 15) / 16) as u32, 1);
             }
             barrier();
-            
+
+            // Zero LayerNorm gradient buffers before atomicAdd accumulation
+            unsafe {
+                device.cmd_fill_buffer(cmd_buffer, final_ln_gamma_grad_buf, 0, (d_model * 4) as u64, 0);
+                device.cmd_fill_buffer(cmd_buffer, final_ln_beta_grad_buf, 0, (d_model * 4) as u64, 0);
+            }
+            barrier();
+
             // Backward through final LayerNorm
             // Shader bindings: (0:input, 1:grad_output, 2:stats, 3:gamma, 4:grad_input, 5:gamma_grad, 6:beta_grad)
             update_desc(final_ln_backward_desc, &[
@@ -1707,15 +1833,19 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 // --- FFN Backward ---
                 
                 // FFN W2 backward: d_ffn_hidden = d_layer_input @ ffn_w2^T
+                // FIXED: For mode 0 (dA = dC @ B^T):
+                // dC = d_layer_input (M × N) = (64 × 256)
+                // B = ffn_w2 (K × N) = (1024 × 256), so B^T = (256 × 1024)
+                // dA = d_ffn_hidden (M × K) = (64 × 1024)
                 update_desc(descs.9, &[
                     (0, activations.d_layer_input.0, (max_positions * d_model * 4) as u64),
                     (1, layer.ffn_w2.0, (ffn_dim * d_model * 4) as u64),
                     (2, activations.d_ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),
                 ]);
                 let ffn2_back_push = GemmPushConstants {
-                    m: num_positions as u32,
-                    k: d_model as u32,
-                    n: ffn_dim as u32,
+                    m: num_positions as u32,  // 64
+                    k: ffn_dim as u32,        // 1024 (NOT d_model!)
+                    n: d_model as u32,        // 256 (NOT ffn_dim!)
                     use_bias: 0,
                 };
                 unsafe {
@@ -1746,10 +1876,27 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                     device.cmd_dispatch(cmd_buffer, ((d_model + 15) / 16) as u32, ((ffn_dim + 15) / 16) as u32, 1);
                 }
                 barrier();
-                
+
+                // FFN B2 bias gradient: d_b2 = sum(d_layer_input, axis=0)
+                update_desc(descs.32, &[
+                    (0, activations.d_layer_input.0, (max_positions * d_model * 4) as u64),
+                    (1, layer.ffn_b2_grad.0, (d_model * 4) as u64),
+                ]);
+                let bias2_grad_push = BiasGradientPushConstants {
+                    num_rows: num_positions as u32,
+                    num_cols: d_model as u32,
+                };
+                unsafe {
+                    device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, bias_gradient_pipeline);
+                    device.cmd_bind_descriptor_sets(cmd_buffer, vk::PipelineBindPoint::COMPUTE, pipeline_layout, 0, &[descs.32], &[]);
+                    device.cmd_push_constants(cmd_buffer, pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, push_to_bytes(&bias2_grad_push));
+                    device.cmd_dispatch(cmd_buffer, ((d_model + 255) / 256) as u32, 1, 1);
+                }
+                barrier();
+
                 // GELU backward: d_ffn_hidden *= gelu'(pre_gelu)
                 update_desc(descs.11, &[
-                    (0, activations.ffn_hidden.0, (max_positions * ffn_dim * 4) as u64), // pre-gelu (approximated as post)
+                    (0, activations.pre_gelu.0, (max_positions * ffn_dim * 4) as u64), // Correct: use saved PRE-gelu values
                     (1, activations.d_ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),
                 ]);
                 let gelu_push = GeluPushConstants { num_elements: (num_positions * ffn_dim) as u32 };
@@ -1762,15 +1909,19 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 barrier();
                 
                 // FFN W1 backward: d_ln2_out = d_ffn_hidden @ ffn_w1^T
+                // FIXED: For mode 0 (dA = dC @ B^T):
+                // dC = d_ffn_hidden (M × N) = (64 × 1024)
+                // B = ffn_w1 (K × N) = (256 × 1024), so B^T = (1024 × 256)
+                // dA = d_ln2_out (M × K) = (64 × 256)
                 update_desc(descs.12, &[
                     (0, activations.d_ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),
                     (1, layer.ffn_w1.0, (d_model * ffn_dim * 4) as u64),
                     (2, activations.d_ln2_out.0, (max_positions * d_model * 4) as u64),
                 ]);
                 let ffn1_back_push = GemmPushConstants {
-                    m: num_positions as u32,
-                    k: ffn_dim as u32,
-                    n: d_model as u32,
+                    m: num_positions as u32,  // 64
+                    k: d_model as u32,        // 256 (NOT ffn_dim!)
+                    n: ffn_dim as u32,        // 1024 (NOT d_model!)
                     use_bias: 0,
                 };
                 unsafe {
@@ -1801,11 +1952,35 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                     device.cmd_dispatch(cmd_buffer, ((ffn_dim + 15) / 16) as u32, ((d_model + 15) / 16) as u32, 1);
                 }
                 barrier();
-                
+
+                // FFN B1 bias gradient: d_b1 = sum(d_ffn_hidden, axis=0)
+                update_desc(descs.31, &[
+                    (0, activations.d_ffn_hidden.0, (max_positions * ffn_dim * 4) as u64),
+                    (1, layer.ffn_b1_grad.0, (ffn_dim * 4) as u64),
+                ]);
+                let bias1_grad_push = BiasGradientPushConstants {
+                    num_rows: num_positions as u32,
+                    num_cols: ffn_dim as u32,
+                };
+                unsafe {
+                    device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, bias_gradient_pipeline);
+                    device.cmd_bind_descriptor_sets(cmd_buffer, vk::PipelineBindPoint::COMPUTE, pipeline_layout, 0, &[descs.31], &[]);
+                    device.cmd_push_constants(cmd_buffer, pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, push_to_bytes(&bias1_grad_push));
+                    device.cmd_dispatch(cmd_buffer, ((ffn_dim + 255) / 256) as u32, 1, 1);
+                }
+                barrier();
+
                 // --- LayerNorm2 backward ---
                 // Input: d_ln2_out (gradient w.r.t. LN2 output)
                 // Outputs: d_ln2_in (gradient w.r.t. LN2 input), ln2_gamma_grad, ln2_beta_grad
                 // Shader bindings: (0:input, 1:grad_output, 2:stats, 3:gamma, 4:grad_input, 5:gamma_grad, 6:beta_grad)
+                // Zero LN2 gradient buffers before atomicAdd accumulation
+                unsafe {
+                    device.cmd_fill_buffer(cmd_buffer, layer.ln2_gamma_grad.0, 0, (d_model * 4) as u64, 0);
+                    device.cmd_fill_buffer(cmd_buffer, layer.ln2_beta_grad.0, 0, (d_model * 4) as u64, 0);
+                }
+                barrier();
+
                 update_desc(descs.24, &[
                     (0, activations.residual1.0, (max_positions * d_model * 4) as u64),   // LN2 input (residual1)
                     (1, activations.d_ln2_out.0, (max_positions * d_model * 4) as u64),   // gradient input
@@ -1865,7 +2040,44 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                     device.cmd_dispatch(cmd_buffer, ((ffn_dim * d_model + 255) / 256) as u32, 1, 1);
                 }
                 barrier();
-                
+
+                // --- Adam updates for FFN biases (matches CUDA's bias=True) ---
+                let ffn_b1_adam_push = AdamPushConstants {
+                    num_params: ffn_dim as u32,
+                    lr, beta1, beta2, eps: 1e-8, beta1_t, beta2_t, _pad: 0,
+                };
+                update_desc(descs.33, &[
+                    (0, layer.ffn_b1.0, (ffn_dim * 4) as u64),
+                    (1, layer.ffn_b1_grad.0, (ffn_dim * 4) as u64),
+                    (2, layer.ffn_b1_m.0, (ffn_dim * 4) as u64),
+                    (3, layer.ffn_b1_v.0, (ffn_dim * 4) as u64),
+                ]);
+                unsafe {
+                    device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, adam_pipeline);
+                    device.cmd_bind_descriptor_sets(cmd_buffer, vk::PipelineBindPoint::COMPUTE, pipeline_layout, 0, &[descs.33], &[]);
+                    device.cmd_push_constants(cmd_buffer, pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, push_to_bytes(&ffn_b1_adam_push));
+                    device.cmd_dispatch(cmd_buffer, ((ffn_dim + 255) / 256) as u32, 1, 1);
+                }
+                barrier();
+
+                let ffn_b2_adam_push = AdamPushConstants {
+                    num_params: d_model as u32,
+                    lr, beta1, beta2, eps: 1e-8, beta1_t, beta2_t, _pad: 0,
+                };
+                update_desc(descs.34, &[
+                    (0, layer.ffn_b2.0, (d_model * 4) as u64),
+                    (1, layer.ffn_b2_grad.0, (d_model * 4) as u64),
+                    (2, layer.ffn_b2_m.0, (d_model * 4) as u64),
+                    (3, layer.ffn_b2_v.0, (d_model * 4) as u64),
+                ]);
+                unsafe {
+                    device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, adam_pipeline);
+                    device.cmd_bind_descriptor_sets(cmd_buffer, vk::PipelineBindPoint::COMPUTE, pipeline_layout, 0, &[descs.34], &[]);
+                    device.cmd_push_constants(cmd_buffer, pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, push_to_bytes(&ffn_b2_adam_push));
+                    device.cmd_dispatch(cmd_buffer, ((d_model + 255) / 256) as u32, 1, 1);
+                }
+                barrier();
+
                 // --- Residual: add d_layer_input to d_ln2_in for attention backward ---
                 update_desc(descs.14, &[
                     (0, activations.d_ln2_in.0, (max_positions * d_model * 4) as u64),
@@ -1988,6 +2200,13 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 barrier();
                 
                 // --- LayerNorm1 backward ---
+                // Zero LN1 gradient buffers before atomicAdd accumulation
+                unsafe {
+                    device.cmd_fill_buffer(cmd_buffer, layer.ln1_gamma_grad.0, 0, (d_model * 4) as u64, 0);
+                    device.cmd_fill_buffer(cmd_buffer, layer.ln1_beta_grad.0, 0, (d_model * 4) as u64, 0);
+                }
+                barrier();
+
                 // Shader bindings: (0:input, 1:grad_output, 2:stats, 3:gamma, 4:grad_input, 5:gamma_grad, 6:beta_grad)
                 update_desc(descs.25, &[
                     (0, activations.layer_input.0, (max_positions * d_model * 4) as u64),
@@ -2079,12 +2298,15 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 barrier();
                 
                 // --- Residual + prepare d_layer_input for next (lower) layer ---
-                // For the next layer backward, copy d_ln1_in to d_layer_input
+                // For the first residual (residual1 = attn_out + layer_input):
+                //   d_layer_input = d_ln1_in + d_attn_out
+                // d_ln1_in comes from attention backward, d_attn_out is the skip connection
                 update_desc(descs.23, &[
                     (0, activations.d_ln1_in.0, (max_positions * d_model * 4) as u64),
-                    (1, activations.d_layer_input.0, (max_positions * d_model * 4) as u64),
+                    (1, activations.d_attn_out.0, (max_positions * d_model * 4) as u64),  // Add skip connection!
+                    (2, activations.d_layer_input.0, (max_positions * d_model * 4) as u64),
                 ]);
-                let copy_push = ElementwisePushConstants { num_elements: (num_positions * d_model) as u32, mode: 4, scalar: 0.0 };
+                let copy_push = ElementwisePushConstants { num_elements: (num_positions * d_model) as u32, mode: 0, scalar: 0.0 }; // mode 0 = ADD
                 unsafe {
                     device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::COMPUTE, elementwise_pipeline);
                     device.cmd_bind_descriptor_sets(cmd_buffer, vk::PipelineBindPoint::COMPUTE, pipeline_layout, 0, &[descs.23], &[]);
@@ -2095,6 +2317,13 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
             }
             
             // --- Embedding backward ---
+            // Zero embedding gradient buffers before atomicAdd accumulation
+            unsafe {
+                device.cmd_fill_buffer(cmd_buffer, token_emb_grad_buf, 0, (vocab_size * d_model * 4) as u64, 0);
+                device.cmd_fill_buffer(cmd_buffer, pos_emb_grad_buf, 0, (max_seq_len * d_model * 4) as u64, 0);
+            }
+            barrier();
+
             // d_layer_input now holds gradient for embeddings
             update_desc(embedding_backward_desc, &[
                 (0, input_buf, (max_positions * 4) as u64),
@@ -2169,7 +2398,60 @@ pub fn train_gpu(config: TrainConfig) -> Result<TrainHistory, String> {
                 .map_err(|e| format!("Reset fence failed: {:?}", e))?;
             unsafe { device.reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty()) }
                 .map_err(|e| format!("Reset cmd failed: {:?}", e))?;
-            
+
+            // DEBUG: Dump activations and gradients for first batch of first epoch
+            if epoch == 1 && _batch_idx == 0 {
+                println!("\n=== DEBUG DUMP (Epoch 1, Batch 0) ===");
+                println!("num_positions={} d_model={} vocab_size={} ffn_dim={}", num_positions, d_model, vocab_size, ffn_dim);
+
+                // Forward pass activations
+                dump_tensor("embedded", embedded_mem, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("layer_input", activations.layer_input.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("ln1_out", activations.ln1_out.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("v", activations.v.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("attn_out", activations.attn_out.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("residual1", activations.residual1.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("ln2_out", activations.ln2_out.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("ffn_hidden", activations.ffn_hidden.1, num_positions * ffn_dim, &[num_positions, ffn_dim])?;
+                dump_tensor("ffn_out", activations.ffn_out.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("layer_output", activations.layer_output.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("logits", logits_mem, num_positions * vocab_size, &[num_positions, vocab_size])?;
+                dump_tensor("softmax", softmax_mem, num_positions * vocab_size, &[num_positions, vocab_size])?;
+                dump_tensor("losses", losses_mem, num_positions, &[num_positions])?;
+
+                // Backward pass gradients
+                dump_tensor("logits_grad", logits_grad_mem, num_positions * vocab_size, &[num_positions, vocab_size])?;
+                dump_tensor("d_layer_output", activations.d_layer_output.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("d_layer_input", activations.d_layer_input.1, num_positions * d_model, &[num_positions, d_model])?;
+                dump_tensor("d_ffn_hidden", activations.d_ffn_hidden.1, num_positions * ffn_dim, &[num_positions, ffn_dim])?;
+                dump_tensor("d_ln2_out", activations.d_ln2_out.1, num_positions * d_model, &[num_positions, d_model])?;
+
+                println!("\n=== HLX GRADIENT STATISTICS (Epoch 1, Batch 0) ===");
+
+                // Embedding gradients
+                dump_tensor("token_emb_grad", token_emb_grad_mem, vocab_size * d_model, &[vocab_size, d_model])?;
+                dump_tensor("pos_emb_grad", pos_emb_grad_mem, max_seq_len * d_model, &[max_seq_len, d_model])?;
+
+                // Layer 0 weight gradients (for comparison with CUDA)
+                dump_tensor("L0_ln1_gamma_grad", layers[0].ln1_gamma_grad.1, d_model, &[d_model])?;
+                dump_tensor("L0_ln1_beta_grad", layers[0].ln1_beta_grad.1, d_model, &[d_model])?;
+                dump_tensor("L0_v_proj_grad", layers[0].v_proj_grad.1, d_model * d_model, &[d_model, d_model])?;
+                dump_tensor("L0_o_proj_grad", layers[0].o_proj_grad.1, d_model * d_model, &[d_model, d_model])?;
+                dump_tensor("L0_ln2_gamma_grad", layers[0].ln2_gamma_grad.1, d_model, &[d_model])?;
+                dump_tensor("L0_ln2_beta_grad", layers[0].ln2_beta_grad.1, d_model, &[d_model])?;
+                dump_tensor("L0_ffn_w1_grad", layers[0].ffn_w1_grad.1, d_model * ffn_dim, &[d_model, ffn_dim])?;
+                dump_tensor("L0_ffn_b1_grad", layers[0].ffn_b1_grad.1, ffn_dim, &[ffn_dim])?;
+                dump_tensor("L0_ffn_w2_grad", layers[0].ffn_w2_grad.1, ffn_dim * d_model, &[ffn_dim, d_model])?;
+                dump_tensor("L0_ffn_b2_grad", layers[0].ffn_b2_grad.1, d_model, &[d_model])?;
+
+                // Final LayerNorm and output projection
+                dump_tensor("final_ln_gamma_grad", final_ln_gamma_grad_mem, d_model, &[d_model])?;
+                dump_tensor("final_ln_beta_grad", final_ln_beta_grad_mem, d_model, &[d_model])?;
+                dump_tensor("output_proj_grad", output_proj_grad_mem, d_model * vocab_size, &[d_model, vocab_size])?;
+
+                println!("=== END HLX GRADIENT STATISTICS ===\n");
+            }
+
             // Download loss
             let mut loss_val = [0.0f32];
             download_f32(loss_mem, &mut loss_val)?;

@@ -23,14 +23,10 @@ layout(binding = 0, std430) readonly buffer Input {
     float input_data[];
 };
 
-// Gradient from upstream
-layout(binding = 1, std430) readonly buffer GradOutput {
-    float grad_output[];
-};
-
-// Gradient w.r.t. input
-layout(binding = 2, std430) writeonly buffer GradInput {
-    float grad_input[];
+// Gradient from upstream - modified in-place
+// d_ffn_hidden *= gelu'(pre_gelu)
+layout(binding = 1, std430) buffer GradInOut {
+    float grad_data[];
 };
 
 // Parameters
@@ -61,12 +57,12 @@ float gelu_derivative(float x) {
 // --- Main Entry Point ---
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    
+
     if (gid >= params.num_elements) {
         return;
     }
-    
+
     float x = input_data[gid];
-    float dy = grad_output[gid];
-    grad_input[gid] = dy * gelu_derivative(x);
+    float dy = grad_data[gid];  // Read upstream gradient
+    grad_data[gid] = dy * gelu_derivative(x);  // Write back in-place
 }

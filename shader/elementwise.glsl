@@ -9,8 +9,9 @@
 //   2: mul:   C = A * B
 //   3: scale: C = A * scalar
 //   4: add_scalar: C = A + scalar
+//   5: zero: C = 0
 //
-// Used for residual connections, scaling, etc.
+// Used for residual connections, scaling, zeroing gradients, etc.
 // =============================================================================
 
 #define BLOCK_SIZE 256
@@ -65,6 +66,9 @@ void main() {
             break;
         case 4:  // add_scalar
             result = a + params.scalar;
+            break;
+        case 5:  // zero
+            result = 0.0;
             break;
         default:
             result = a;
