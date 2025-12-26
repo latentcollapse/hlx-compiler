@@ -1,6 +1,3 @@
-// Hello World in HLXL
-// Run with: python3 -c "from runtime.hlx_runtime import HLXLBasicRuntime; r = HLXLBasicRuntime(); exec(open('hello_world.hlxl').read())"
-
 print("Hello, HLX World!")
 
 let name = "AMD"

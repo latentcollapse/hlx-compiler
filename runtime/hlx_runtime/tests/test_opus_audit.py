@@ -25,7 +25,7 @@ from hlx_runtime.errors import E_FLOAT_SPECIAL, E_DEPTH_EXCEEDED, E_FIELD_ORDER,
 PASS = 0
 FAIL = 0
 
-def test(name, condition, msg=""):
+def verify(name, condition, msg=""):
     global PASS, FAIL
     if condition:
         print(f"  ✓ {name}")
@@ -54,11 +54,11 @@ def test_axiom_a1_determinism():
         first = encode_lcb(val)
         for _ in range(100):  # 100 iterations per value
             if encode_lcb(val) != first:
-                test(f"Determinism {repr(val)[:30]}", False, "Output varied!")
+                verify(f"Determinism {repr(val)[:30]}", False, "Output varied!")
                 all_pass = False
                 break
         else:
-            test(f"Determinism {repr(val)[:30]}", True)
+            verify(f"Determinism {repr(val)[:30]}", True)
 
     return all_pass
 
@@ -85,12 +85,12 @@ def test_axiom_a2_reversibility():
             decoded = decode_lcb(encoded)
             # For dicts, compare canonical encoding
             if encode_lcb(decoded) == encode_lcb(val):
-                test(f"Reversibility {repr(val)[:30]}", True)
+                verify(f"Reversibility {repr(val)[:30]}", True)
             else:
-                test(f"Reversibility {repr(val)[:30]}", False, f"Got {decoded}")
+                verify(f"Reversibility {repr(val)[:30]}", False, f"Got {decoded}")
                 all_pass = False
         except Exception as e:
-            test(f"Reversibility {repr(val)[:30]}", False, str(e))
+            verify(f"Reversibility {repr(val)[:30]}", False, str(e))
             all_pass = False
 
     return all_pass
@@ -109,9 +109,9 @@ def test_axiom_a3_bijection():
     all_pass = True
     for val in test_values:
         if verify_bijection(val):
-            test(f"Bijection {repr(val)[:30]}", True)
+            verify(f"Bijection {repr(val)[:30]}", True)
         else:
-            test(f"Bijection {repr(val)[:30]}", False)
+            verify(f"Bijection {repr(val)[:30]}", False)
             all_pass = False
 
     return all_pass
@@ -138,9 +138,9 @@ def test_axiom_a4_universal_value():
     for val, expected_type in types_to_test:
         try:
             encoded = encode_lcb(val)
-            test(f"Type {expected_type}", len(encoded) > 0)
+            verify(f"Type {expected_type}", len(encoded) > 0)
         except Exception as e:
-            test(f"Type {expected_type}", False, str(e))
+            verify(f"Type {expected_type}", False, str(e))
             all_pass = False
 
     return all_pass
@@ -163,13 +163,13 @@ def test_invariant_001_total_fidelity():
             if encode_lcb(decoded) == encoded:
                 pass  # OK
             else:
-                test(f"Random value {i}", False, "Fidelity lost")
+                verify(f"Random value {i}", False, "Fidelity lost")
                 all_pass = False
         except Exception as e:
-            test(f"Random value {i}", False, str(e))
+            verify(f"Random value {i}", False, str(e))
             all_pass = False
 
-    test("50 random values", all_pass)
+    verify("50 random values", all_pass)
     return all_pass
 
 
@@ -212,9 +212,9 @@ def test_invariant_002_handle_idempotence():
         h1 = cas.store(val)
         h2 = cas.store(val)
         if h1 == h2:
-            test(f"Idempotent {repr(val)[:20]}", True)
+            verify(f"Idempotent {repr(val)[:20]}", True)
         else:
-            test(f"Idempotent {repr(val)[:20]}", False, f"{h1} != {h2}")
+            verify(f"Idempotent {repr(val)[:20]}", False, f"{h1} != {h2}")
             all_pass = False
 
     return all_pass
@@ -229,14 +229,14 @@ def test_invariant_003_field_order():
     encoded = encode_lcb(unsorted)
     decoded = decode_lcb(encoded)
     keys = list(decoded.keys())
-    test("Keys sorted after round-trip", keys == sorted(keys))
+    verify("Keys sorted after round-trip", keys == sorted(keys))
 
     # Test that decoder rejects out-of-order keys
     # We need to manually craft malformed binary
     # For now, test that encoder always produces sorted output
     encoded1 = encode_lcb({"a": 1, "b": 2})
     encoded2 = encode_lcb({"b": 2, "a": 1})
-    test("Encoder produces canonical order", encoded1 == encoded2)
+    verify("Encoder produces canonical order", encoded1 == encoded2)
 
     return True
 
@@ -250,29 +250,29 @@ def test_edge_cases():
     # Float specials
     try:
         encode_lcb(float('nan'))
-        test("NaN rejected", False, "Should have raised")
+        verify("NaN rejected", False, "Should have raised")
         all_pass = False
     except LCEncodeError as e:
-        test("NaN rejected", E_FLOAT_SPECIAL in str(e))
+        verify("NaN rejected", E_FLOAT_SPECIAL in str(e))
 
     try:
         encode_lcb(float('inf'))
-        test("Inf rejected", False, "Should have raised")
+        verify("Inf rejected", False, "Should have raised")
         all_pass = False
     except LCEncodeError as e:
-        test("Inf rejected", E_FLOAT_SPECIAL in str(e))
+        verify("Inf rejected", E_FLOAT_SPECIAL in str(e))
 
     try:
         encode_lcb(float('-inf'))
-        test("-Inf rejected", False, "Should have raised")
+        verify("-Inf rejected", False, "Should have raised")
         all_pass = False
     except LCEncodeError as e:
-        test("-Inf rejected", E_FLOAT_SPECIAL in str(e))
+        verify("-Inf rejected", E_FLOAT_SPECIAL in str(e))
 
     # Zero normalization
     enc_pos = encode_lcb(0.0)
     enc_neg = encode_lcb(-0.0)
-    test("Zero normalization", enc_pos == enc_neg)
+    verify("Zero normalization", enc_pos == enc_neg)
 
     # Max depth
     deep = 0
@@ -280,10 +280,10 @@ def test_edge_cases():
         deep = [deep]
     try:
         encode_lcb(deep)
-        test("Depth 65 rejected", False, "Should have raised")
+        verify("Depth 65 rejected", False, "Should have raised")
         all_pass = False
     except LCEncodeError as e:
-        test("Depth 65 rejected", E_DEPTH_EXCEEDED in str(e))
+        verify("Depth 65 rejected", E_DEPTH_EXCEEDED in str(e))
 
     # Depth 64 should work
     deep64 = 0
@@ -291,9 +291,9 @@ def test_edge_cases():
         deep64 = [deep64]
     try:
         encode_lcb(deep64)
-        test("Depth 64 allowed", True)
+        verify("Depth 64 allowed", True)
     except LCEncodeError:
-        test("Depth 64 allowed", False, "Should have succeeded")
+        verify("Depth 64 allowed", False, "Should have succeeded")
         all_pass = False
 
     return all_pass
@@ -309,22 +309,22 @@ def test_cas_correctness():
     # Basic store/retrieve
     h = cas.store(123)
     val = cas.retrieve(h)
-    test("Store/Retrieve", val == 123)
+    verify("Store/Retrieve", val == 123)
 
     # Handle format
-    test("Handle format", h.startswith("&h_"))
+    verify("Handle format", h.startswith("&h_"))
 
     # Exists
-    test("Exists (yes)", cas.exists(h))
-    test("Exists (no)", not cas.exists("&h_fake_abc123"))
+    verify("Exists (yes)", cas.exists(h))
+    verify("Exists (no)", not cas.exists("&h_fake_abc123"))
 
     # Not found
     try:
         cas.retrieve("&h_nonexistent_abc")
-        test("Not found raises", False)
+        verify("Not found raises", False)
         all_pass = False
     except Exception as e:
-        test("Not found raises", E_HANDLE_NOT_FOUND in str(e))
+        verify("Not found raises", E_HANDLE_NOT_FOUND in str(e))
 
     # Snapshot/Restore
     cas2 = CASStore()
@@ -332,7 +332,7 @@ def test_cas_correctness():
     snap = cas2.snapshot()
     cas2.store(200)
     cas2.restore(snap)
-    test("Snapshot/Restore", len(snap) == 1)
+    verify("Snapshot/Restore", len(snap) == 1)
 
     # Collision resistance (1000 distinct values)
     cas3 = CASStore()
@@ -340,7 +340,7 @@ def test_cas_correctness():
     for i in range(1000):
         h = cas3.store({"value": i, "data": f"item_{i}"})
         handles.add(h)
-    test("Collision resistance (1000)", len(handles) == 1000)
+    verify("Collision resistance (1000)", len(handles) == 1000)
 
     return all_pass
 
@@ -357,7 +357,7 @@ def test_transaction_atomicity():
         return "ok"
 
     result = transaction(success_fn, cas)
-    test("Successful transaction", result == "ok")
+    verify("Successful transaction", result == "ok")
 
     # Failed transaction should rollback
     cas2 = CASStore()
@@ -369,11 +369,11 @@ def test_transaction_atomicity():
 
     try:
         transaction(fail_fn, cas2)
-        test("Failed transaction rollback", False, "Should have raised")
+        verify("Failed transaction rollback", False, "Should have raised")
     except ValueError:
         # CAS should be unchanged
         current_snap = cas2.snapshot()
-        test("Failed transaction rollback", current_snap == initial_snap)
+        verify("Failed transaction rollback", current_snap == initial_snap)
 
     return True
 
@@ -384,24 +384,24 @@ def test_pre_serialize():
 
     # NFC normalization
     # café with combining acute vs single char
-    test("NFC normalization", pre_serialize("cafe\u0301") == pre_serialize("café"))
+    verify("NFC normalization", pre_serialize("cafe\u0301") == pre_serialize("café"))
 
     # Zero normalization
-    test("Zero normalization", pre_serialize(-0.0) == 0.0)
+    verify("Zero normalization", pre_serialize(-0.0) == 0.0)
 
     # Key ordering
     result = pre_serialize({"z": 1, "a": 2})
-    test("Key ordering", list(result.keys()) == ["a", "z"])
+    verify("Key ordering", list(result.keys()) == ["a", "z"])
 
     # Whitespace cleanup
-    test("Whitespace cleanup", pre_serialize("hello  \r\n") == "hello")
+    verify("Whitespace cleanup", pre_serialize("hello  \r\n") == "hello")
 
     # Float special rejection
     try:
         pre_serialize(float('nan'))
-        test("Pre-serialize NaN", False)
+        verify("Pre-serialize NaN", False)
     except FloatSpecialError as e:
-        test("Pre-serialize NaN", e.code == E_FLOAT_SPECIAL)
+        verify("Pre-serialize NaN", e.code == E_FLOAT_SPECIAL)
 
     return True
 
@@ -413,17 +413,17 @@ def test_lct_parser():
     parser = LCTParser()
 
     # Simple values
-    test("LC-T INT", parser.parse_text("[INT(123)]") == 123)
-    test("LC-T NULL", parser.parse_text("[NULL]") is None)
-    test("LC-T TRUE", parser.parse_text("[TRUE]") is True)
-    test("LC-T FLOAT", parser.parse_text("[FLOAT(3.14)]") == 3.14)
+    verify("LC-T INT", parser.parse_text("[INT(123)]") == 123)
+    verify("LC-T NULL", parser.parse_text("[NULL]") is None)
+    verify("LC-T TRUE", parser.parse_text("[TRUE]") is True)
+    verify("LC-T FLOAT", parser.parse_text("[FLOAT(3.14)]") == 3.14)
 
     # Round-trip
     val = {"a": 1, "b": [2, 3]}
     text = parser.to_text(val)
     # Note: to_text output may not be parseable by parse_text due to format differences
     # Just test that to_text produces something
-    test("LC-T to_text", len(text) > 0)
+    verify("LC-T to_text", len(text) > 0)
 
     return True
 
@@ -435,32 +435,32 @@ def test_contract_validation():
     # Valid contract
     try:
         validate_contract(14, {"@0": 123})
-        test("Valid contract 14", True)
+        verify("Valid contract 14", True)
     except Exception as e:
-        test("Valid contract 14", False, str(e))
+        verify("Valid contract 14", False, str(e))
 
     # Missing field
     try:
         validate_contract(14, {})
-        test("Missing field rejected", False)
+        verify("Missing field rejected", False)
     except Exception:
-        test("Missing field rejected", True)
+        verify("Missing field rejected", True)
 
     # Wrong type
     try:
         validate_contract(14, {"@0": "not an int"})
-        test("Wrong type rejected", False)
+        verify("Wrong type rejected", False)
     except Exception:
-        test("Wrong type rejected", True)
+        verify("Wrong type rejected", True)
 
     # Wrap/unwrap
     wrapped = wrap_literal(42)
     unwrapped = unwrap_literal(wrapped)
-    test("Wrap/unwrap literal", unwrapped == 42)
+    verify("Wrap/unwrap literal", unwrapped == 42)
 
     wrapped_complex = wrap_literal({"a": [1, 2, 3]})
     unwrapped_complex = unwrap_literal(wrapped_complex)
-    test("Wrap/unwrap complex", unwrapped_complex == {"a": [1, 2, 3]})
+    verify("Wrap/unwrap complex", unwrapped_complex == {"a": [1, 2, 3]})
 
     return True
 
