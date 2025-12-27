@@ -18,7 +18,7 @@
 | **Reproducibility** | **100% (bit-exact)** | ~95% (best effort) | **Guaranteed** |
 | **Hardware Support** | AMD + NVIDIA + Intel | NVIDIA only | **Cross-vendor** |
 
-**Key Achievement:** HLX achieves better final loss (lower is better) while guaranteeing 100% reproducibility across all hardware.
+**Key Achievement:** HLX achieves better final loss (lower is better) while guaranteeing 100% reproducibility across, so far, NVIDIA hardware.
 
 ---
 
@@ -136,10 +136,8 @@ CUDA baseline varies slightly across runs (0.5125 - 0.5131 range).
 | GPU | Final Loss | Match |
 |-----|------------|-------|
 | NVIDIA RTX 5060 | 0.4783 | ✅ (reference) |
-| AMD RX 6700 XT | 0.4783 | ✅ (bit-exact) |
-| Intel Arc A770 | 0.4783 | ✅ (bit-exact) |
 
-All three vendors produce **identical** results - true cross-vendor portability.
+NVIDIA hardware so far provides consistent results. Will likely need different versions for AMD and Intel.
 
 ---
 
@@ -226,16 +224,5 @@ CUDA prioritizes:
 
 **HLX demonstrates that:**
 1. ✅ Deterministic GPU execution is achievable
-2. ✅ Cross-vendor portability works (AMD, NVIDIA, Intel)
-3. ✅ Higher-level abstractions can *improve* results (0.4783 vs 0.5128)
-4. ✅ Open standards (Vulkan/SPIR-V) are production-ready
-
-**For AMD:**
-- Proves portable GPU compute is viable
-- Shows determinism enables better optimization
-- Demonstrates ROCm/Vulkan alignment potential
-- Provides reference implementation for ML on Vulkan
-
----
-
-**Next Steps:** See [../README_AMD.md](../README_AMD.md) for collaboration opportunities.
+2. ✅ Higher-level abstractions can *improve* results (0.4783 vs 0.5128)
+3. ✅ Open standards (Vulkan/SPIR-V) are production-ready
