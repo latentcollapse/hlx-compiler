@@ -1,3 +1,5 @@
+**Developer's note: This is early and rough. It's rapidly prototyped using Claude. The idea behind HLX is that English is full of entropy. LLMs "think" in a structured way, and so the idea behind this project was that providing LLMs with a native substrate that mimics the way they structure data, it could reduce hallucinations and enable more precise data transfer through mathematical compression of the data itself. This won't eliminate hallucinations in LLMs, but the theory is that by removing the noise, it could allow them to hit much higher benchmarks**
+
 # HLX Language and System Documentation
 
 Complete specifications for the HLX language ecosystem, compiler, and runtimes.
