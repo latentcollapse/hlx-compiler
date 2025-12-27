@@ -236,7 +236,6 @@ python3 -m pytest tests/ -v
 
 ### Option 1: Read the Documentation
 
-- **[README_AMD.md](README_AMD.md)** - Complete technical overview
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design
 - **[docs/CONTRACTS.md](docs/CONTRACTS.md)** - Contract specifications
 
@@ -406,4 +405,3 @@ wsl --install
 
 ---
 
-**Next:** Read [README_AMD.md](README_AMD.md) for the full technical deep-dive.
